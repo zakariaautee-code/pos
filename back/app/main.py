@@ -8463,9 +8463,9 @@ def call_out_shift(
     )
     capacity = publish_capacity_update(session, current_user.tenant_id)
 
-    # Phase 4 hook: SMS broadcast to eligible off-duty staff (no-op without Twilio).
+    # Phase 4 hook: voice broadcast to eligible off-duty staff (no-op without Asterisk).
     try:
-        from .services.sms import broadcast_shift_callout
+        from .services.asterisk import broadcast_shift_callout
 
         broadcast_shift_callout(session, shift)
     except Exception:
@@ -8477,6 +8477,44 @@ def call_out_shift(
         "callout_reason": shift.callout_reason,
         "capacity": capacity,
     }
+
+
+@app.post("/shifts/{shift_id}/pickup")
+def pickup_shift(
+    shift_id: int,
+    request: Request,
+    session: Session = Depends(get_session),
+) -> dict:
+    """
+    IVR accept: an employee pressed 1 on the call-out broadcast, so cover the
+    shift and restore floor coverage.
+
+    The PBX has no user session - it authenticates with the shared
+    ASTERISK_PICKUP_TOKEN header (X-Asterisk-Token), see
+    docs/asterisk/extensions.conf. Idempotent: an already-covered shift
+    returns 200 without emitting new events.
+    """
+    if not settings.asterisk_pickup_token:
+        raise HTTPException(status_code=503, detail="Asterisk pickup is not configured")
+    token = request.headers.get("X-Asterisk-Token") or ""
+    if not hmac.compare_digest(token, settings.asterisk_pickup_token):
+        raise HTTPException(status_code=403, detail="Invalid pickup token")
+
+    shift = session.exec(select(models.Shift).where(models.Shift.id == shift_id)).first()
+    if not shift:
+        raise HTTPException(status_code=404, detail="Shift not found")
+
+    already_covered = shift.status == models.ShiftStatus.covered
+    if not already_covered:
+        shift.status = models.ShiftStatus.covered
+        session.add(shift)
+        session.commit()
+        session.refresh(shift)
+        # Coverage restored: emit the same CAPACITY_UPDATED the call-out did,
+        # so open planners flip the badge back to "covered" in real time.
+        publish_capacity_update(session, shift.tenant_id)
+
+    return {"id": shift.id, "status": shift.status.value, "already_covered": already_covered}
 
 
 @app.get("/capacity/live")

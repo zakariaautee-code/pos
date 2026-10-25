@@ -134,11 +134,35 @@ class Settings(BaseSettings):
         validation_alias="TWILIO_WHATSAPP_FROM",
         description="E.g. +14155238886 (Twilio sandbox) or your WhatsApp Business number",
     )
-    # SMS sender number for emergency shift call-out broadcasts (E.164, no whatsapp: prefix).
-    twilio_sms_from: str = Field(
+    # Emergency shift call-out voice broadcast via Asterisk (replaces Twilio SMS).
+    # ASTERISK_ENABLED=false keeps the call-out flow a no-op until a PBX is wired up.
+    asterisk_enabled: bool = Field(
+        default=False,
+        validation_alias="ASTERISK_ENABLED",
+        description="Master switch for Asterisk shift call-out broadcasts",
+    )
+    asterisk_host: str = Field(default="127.0.0.1", validation_alias="ASTERISK_HOST")
+    asterisk_ami_port: int = Field(default=5038, validation_alias="ASTERISK_AMI_PORT")
+    asterisk_ami_user: str = Field(default="admin", validation_alias="ASTERISK_AMI_USER")
+    asterisk_ami_secret: str = Field(
         default="",
-        validation_alias="TWILIO_SMS_FROM",
-        description="E.164 SMS sender, e.g. +14155238886; call-out broadcasts are skipped when unset",
+        validation_alias="ASTERISK_AMI_SECRET",
+        description="AMI credentials (reserved; broadcasts currently use call-file spooling)",
+    )
+    asterisk_outbound_context: str = Field(
+        default="from-internal",
+        validation_alias="ASTERISK_OUTBOUND_CONTEXT",
+        description="Dialplan context that answers and plays the call-out IVR",
+    )
+    asterisk_call_spool_dir: str = Field(
+        default="/var/spool/asterisk/outgoing",
+        validation_alias="ASTERISK_CALL_SPOOL_DIR",
+        description="Asterisk outgoing call-file spool directory",
+    )
+    asterisk_pickup_token: str = Field(
+        default="",
+        validation_alias="ASTERISK_PICKUP_TOKEN",
+        description="Shared secret the IVR sends as X-Asterisk-Token to POST /shifts/{id}/pickup; pickup returns 503 when unset",
     )
     # Shared secret for external POS platforms (Toast/Square/...) posting check events.
     pos_webhook_secret: str = Field(

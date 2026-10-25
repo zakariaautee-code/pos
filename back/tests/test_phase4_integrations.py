@@ -1,13 +1,17 @@
-"""Phase 4 integrations: call-out SMS broadcast and POS sync webhooks.
+"""Phase 4 integrations: call-out voice broadcast and POS sync webhooks.
 
 Covers:
-- services/sms.py: eligible off-duty recipients, Twilio no-op when unconfigured
+- services/asterisk.py: eligible off-duty recipients, call-file spooling,
+  no-op when ASTERISK_ENABLED=false, spool failures never break the call-out
+- POST /shifts/{id}/pickup: IVR accept (token auth, idempotent cover)
 - POST /webhooks/pos/{platform}: signature auth, check.opened/check.paid
   table seating/freeing, TABLE_STATUS_CHANGED + CAPACITY_UPDATED events
 """
 from __future__ import annotations
 
 import json
+import shutil
+import tempfile
 import unittest
 from datetime import date, time, timedelta
 from unittest import mock
@@ -64,10 +68,21 @@ class _SettingsOverride:
         return False
 
 
-class Phase4SmsTestCase(PgClientTestCase):
+class Phase4AsteriskTestCase(PgClientTestCase):
     def setUp(self) -> None:
         super().setUp()
-        tenant = models.Tenant(name=f"SMS {uuid4().hex[:8]}")
+        self.spool_dir = tempfile.mkdtemp(prefix="asterisk-spool-")
+        self.addCleanup(shutil.rmtree, self.spool_dir, ignore_errors=True)
+
+        # Pick up the fake Redis so CAPACITY_UPDATED events are observable.
+        import app.main as main_mod
+
+        self.fake_redis = FakeRedis()
+        self._orig_get_redis = main_mod.get_redis
+        main_mod.get_redis = lambda: self.fake_redis  # type: ignore[assignment]
+        self.addCleanup(self._restore_redis)
+
+        tenant = models.Tenant(name=f"ASTERISK {uuid4().hex[:8]}")
         self.session.add(tenant)
         self.session.commit()
         self.session.refresh(tenant)
@@ -121,55 +136,122 @@ class Phase4SmsTestCase(PgClientTestCase):
         self.session.refresh(shift)
         self.shift = shift
 
-    def _configure_twilio(self):
+    def _restore_redis(self) -> None:
+        import app.main as main_mod
+
+        main_mod.get_redis = self._orig_get_redis
+
+    def _configure_asterisk(self, token: str = ""):
         return _SettingsOverride(
-            twilio_account_sid="AC_test",
-            twilio_auth_token="token_test",
-            twilio_sms_from="+14155238886",
-            public_app_base_url="https://pos.example.com",
+            asterisk_enabled=True,
+            asterisk_call_spool_dir=self.spool_dir,
+            asterisk_outbound_context="from-internal",
+            asterisk_pickup_token=token,
         )
 
-    def test_broadcast_reaches_only_off_duty_same_role_with_phone(self) -> None:
-        with self._configure_twilio():
-            with mock.patch("app.services.sms.requests.post") as post:
-                post.return_value = mock.Mock(status_code=201)
-                r = self.client.post(
-                    f"/shifts/{self.shift.id}/call-out",
-                    params={"reason": "sick"},
-                    headers=_bearer_headers(self.owner),
-                )
+    def _spooled_files(self) -> list[str]:
+        import os
+
+        return sorted(
+            f for f in os.listdir(self.spool_dir) if f.endswith(".call")
+        )
+
+    def test_broadcast_spools_call_only_for_off_duty_same_role_with_phone(self) -> None:
+        with self._configure_asterisk():
+            r = self.client.post(
+                f"/shifts/{self.shift.id}/call-out",
+                params={"reason": "sick"},
+                headers=_bearer_headers(self.owner),
+            )
         self.assertEqual(r.status_code, 200, r.text)
 
-        sent_to = {call.kwargs["data"]["To"] for call in post.call_args_list}
-        self.assertEqual(sent_to, {"+34622222222"})
+        files = self._spooled_files()
+        self.assertEqual(files, [f"callout_{self.shift.id}_+34622222222.call"])
 
-        body = post.call_args_list[0].kwargs["data"]["Body"]
-        self.assertIn("cover needed", body)
-        self.assertIn("sick", body)
-        # One-tap pickup link
-        self.assertIn(
-            f"/working-plan?cover_shift={self.shift.id}", body
-        )
+        with open(f"{self.spool_dir}/{files[0]}") as f:
+            content = f.read()
+        self.assertIn("Channel: SIP/provider/+34622222222", content)
+        self.assertIn("Context: from-internal", content)
+        self.assertIn(f"Set: SHIFT_ID={self.shift.id}", content)
+        self.assertIn("Set: SHIFT_ROLE=waiter", content)
+        # On-duty, no-phone and wrong-role staff must not be called.
+        self.assertNotIn("+34611111111", content)
+        self.assertNotIn("+34633333333", content)
 
-    def test_broadcast_is_noop_without_twilio(self) -> None:
-        # Settings are empty in the container by default.
-        with mock.patch("app.services.sms.requests.post") as post:
+    def test_broadcast_is_noop_when_asterisk_disabled(self) -> None:
+        # ASTERISK_ENABLED defaults to false in the container.
+        with _SettingsOverride(asterisk_enabled=False, asterisk_call_spool_dir=self.spool_dir):
             r = self.client.post(
                 f"/shifts/{self.shift.id}/call-out",
                 headers=_bearer_headers(self.owner),
             )
         self.assertEqual(r.status_code, 200, r.text)  # call-out still succeeds
-        post.assert_not_called()
+        self.assertEqual(self._spooled_files(), [])
 
-    def test_single_send_failure_does_not_raise(self) -> None:
-        with self._configure_twilio():
-            with mock.patch("app.services.sms.requests.post") as post:
-                post.side_effect = RuntimeError("network down")
+    def test_spool_write_failure_does_not_raise(self) -> None:
+        with self._configure_asterisk():
+            with mock.patch("app.services.asterisk.os.replace", side_effect=OSError("disk full")):
                 r = self.client.post(
                     f"/shifts/{self.shift.id}/call-out",
                     headers=_bearer_headers(self.owner),
                 )
         self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(self._spooled_files(), [])
+
+    # --- POST /shifts/{id}/pickup (IVR accept) ---
+
+    def _pickup(self, shift_id: int, token: str | None):
+        headers = {"X-Asterisk-Token": token} if token is not None else {}
+        return self.client.post(f"/shifts/{shift_id}/pickup", headers=headers)
+
+    def test_pickup_unconfigured_returns_503(self) -> None:
+        with _SettingsOverride(asterisk_pickup_token=""):
+            r = self._pickup(self.shift.id, "anything")
+        self.assertEqual(r.status_code, 503, r.text)
+
+    def test_pickup_wrong_token_returns_403(self) -> None:
+        with self._configure_asterisk(token="right-token"):
+            r = self._pickup(self.shift.id, "wrong-token")
+        self.assertEqual(r.status_code, 403, r.text)
+        self.session.refresh(self.shift)
+        self.assertNotEqual(self.shift.status, models.ShiftStatus.covered)
+
+    def test_pickup_missing_token_returns_403(self) -> None:
+        with self._configure_asterisk(token="right-token"):
+            r = self._pickup(self.shift.id, None)
+        self.assertEqual(r.status_code, 403, r.text)
+
+    def test_pickup_covers_shift_and_publishes_capacity(self) -> None:
+        with self._configure_asterisk(token="right-token"):
+            r = self._pickup(self.shift.id, "right-token")
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.json()["status"], "covered")
+        self.assertFalse(r.json()["already_covered"])
+
+        self.session.refresh(self.shift)
+        self.assertEqual(self.shift.status, models.ShiftStatus.covered)
+
+        names = [e["event"] for e in self.fake_redis.ops_events()]
+        self.assertIn("CAPACITY_UPDATED", names)
+        self.assertTrue(
+            all(e["organization_id"] == self.tenant.id for e in self.fake_redis.ops_events())
+        )
+
+    def test_pickup_is_idempotent(self) -> None:
+        with self._configure_asterisk(token="t"):
+            first = self._pickup(self.shift.id, "t")
+            self.fake_redis.messages.clear()
+            second = self._pickup(self.shift.id, "t")
+        self.assertEqual(first.status_code, 200, first.text)
+        self.assertEqual(second.status_code, 200, second.text)
+        self.assertTrue(second.json()["already_covered"])
+        # No duplicate capacity storm on a repeated IVR callback.
+        self.assertEqual(self.fake_redis.ops_events(), [])
+
+    def test_pickup_unknown_shift_returns_404(self) -> None:
+        with self._configure_asterisk(token="t"):
+            r = self._pickup(99999999, "t")
+        self.assertEqual(r.status_code, 404, r.text)
 
 
 class Phase4PosWebhookTestCase(PgClientTestCase):
