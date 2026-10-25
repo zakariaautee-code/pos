@@ -134,6 +134,18 @@ class Settings(BaseSettings):
         validation_alias="TWILIO_WHATSAPP_FROM",
         description="E.g. +14155238886 (Twilio sandbox) or your WhatsApp Business number",
     )
+    # SMS sender number for emergency shift call-out broadcasts (E.164, no whatsapp: prefix).
+    twilio_sms_from: str = Field(
+        default="",
+        validation_alias="TWILIO_SMS_FROM",
+        description="E.164 SMS sender, e.g. +14155238886; call-out broadcasts are skipped when unset",
+    )
+    # Shared secret for external POS platforms (Toast/Square/...) posting check events.
+    pos_webhook_secret: str = Field(
+        default="",
+        validation_alias="POS_WEBHOOK_SECRET",
+        description="HMAC-SHA256 secret for X-Pos-Signature on /webhooks/pos/*; webhooks return 503 when unset",
+    )
     default_phone_country: str = Field(
         default="ES",
         validation_alias="DEFAULT_PHONE_COUNTRY",

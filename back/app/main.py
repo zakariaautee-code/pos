@@ -4002,6 +4002,9 @@ def update_user(
     if user_data.full_name is not None:
         target_user.full_name = user_data.full_name
 
+    if user_data.phone is not None:
+        target_user.phone = user_data.phone.strip() or None
+
     new_password = (
         user_data.password.strip() if user_data.password is not None else None
     )
@@ -8460,7 +8463,7 @@ def call_out_shift(
 
     # Phase 4 hook: SMS broadcast to eligible off-duty staff (no-op without Twilio).
     try:
-        from .sms_service import broadcast_shift_callout
+        from .services.sms import broadcast_shift_callout
 
         broadcast_shift_callout(session, shift)
     except Exception:
@@ -8486,6 +8489,39 @@ def get_live_capacity(
     if current_user.tenant_id is None:
         raise HTTPException(status_code=400, detail="User has no organization")
     return compute_live_capacity(session, current_user.tenant_id)
+
+
+@app.post("/webhooks/pos/{platform}")
+async def pos_webhook(
+    platform: str,
+    request: Request,
+    session: Session = Depends(get_session),
+) -> dict:
+    """
+    POS sync hook: external POS platforms (Toast, Square, ...) post ticket
+    state changes (`check.opened`, `check.paid`) so tables seat/free and the
+    capacity header recomputes turn times live.
+
+    Authenticated with an HMAC-SHA256 signature of the raw body
+    (`X-Pos-Signature: sha256=<hex>`) using POS_WEBHOOK_SECRET.
+    """
+    from .services.pos_sync import handle_pos_event, parse_raw_body, verify_signature
+
+    if not settings.pos_webhook_secret:
+        raise HTTPException(status_code=503, detail="POS webhooks are not configured")
+
+    raw = await request.body()
+    signature = request.headers.get("X-Pos-Signature")
+    if not verify_signature(settings.pos_webhook_secret, raw, signature):
+        raise HTTPException(status_code=403, detail="Invalid webhook signature")
+
+    try:
+        payload = parse_raw_body(raw)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Body must be a JSON object")
+
+    result = handle_pos_event(platform, payload, session)
+    return {"platform": platform, **result}
 
 
 @app.get("/schedule")

@@ -282,6 +282,8 @@ class User(SQLModel, table=True):
     email: str = Field(unique=True, index=True)
     hashed_password: str
     full_name: str | None = None
+    # Staff mobile number (E.164 preferred); used for emergency call-out SMS broadcasts.
+    phone: str | None = Field(default=None, max_length=64)
     token_version: int = Field(default=0)  # Increment to invalidate all tokens
     # DB type is user_role (migrations); SQLAlchemy default would be userrole — bind explicitly.
     role: UserRole = Field(
@@ -1411,6 +1413,7 @@ class UserUpdate(SQLModel):
     email: str | None = None
     full_name: str | None = None
     role: UserRole | None = None
+    phone: str | None = None  # Call-out SMS destination; only update if provided
     password: str | None = None  # Optional: only update if provided
     # Required (non-empty) when password is set: authenticates the caller before changing a password.
     actor_current_password: str | None = None
