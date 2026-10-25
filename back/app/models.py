@@ -544,6 +544,11 @@ class Product(TenantMixin, table=True):
     stock_alert_enabled: bool = Field(default=False)
     stock_qty: int = Field(default=0)
     stock_alert_level: int = Field(default=0)
+    # Instant 86: item stays on the menu but cannot be ordered. Toggling it
+    # flips every order view at once. quantity_available (when set) drives the
+    # same thing with a count instead of a boolean.
+    is_86ed: bool = Field(default=False)
+    quantity_available: int | None = Field(default=None)
 
 
 class ProductQuestionType(str, Enum):
@@ -768,6 +773,14 @@ class Table(TenantMixin, table=True):
     activated_at: datetime | None = Field(default=None)  # When table was activated
 
 
+class ShiftStatus(str, Enum):
+    """Lifecycle of a scheduled shift: staffed, called out, or covered by someone else."""
+
+    active = "active"
+    called_out = "called_out"
+    covered = "covered"
+
+
 class Shift(TenantMixin, table=True):
     """Working plan: who is scheduled to work on which date and time slot (kitchen, bar, waiters)."""
     __tablename__ = "shift"
@@ -777,6 +790,22 @@ class Shift(TenantMixin, table=True):
     start_time: time = Field(sa_column=Column(Time, nullable=False))
     end_time: time = Field(sa_column=Column(Time, nullable=False))
     label: str | None = Field(default=None, max_length=64)
+    # DB type is shift_status (migrations); bind explicitly like user_role.
+    status: ShiftStatus = Field(
+        default=ShiftStatus.active,
+        sa_column=Column(
+            SAEnum(
+                ShiftStatus,
+                name="shift_status",
+                native_enum=True,
+                create_type=False,
+                values_callable=lambda cls: [m.value for m in cls],
+            ),
+            nullable=False,
+        ),
+    )
+    # Why the shift was called out (sick, emergency, ...); set with status=called_out.
+    callout_reason: str | None = Field(default=None, max_length=255)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
