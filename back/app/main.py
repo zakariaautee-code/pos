@@ -8377,6 +8377,8 @@ def _shift_to_dict(shift: models.Shift, user_name: str, user_role: str) -> dict:
         "start_time": shift.start_time.strftime("%H:%M") if shift.start_time else None,
         "end_time": shift.end_time.strftime("%H:%M") if shift.end_time else None,
         "label": shift.label,
+        "status": shift.status.value if shift.status else None,
+        "callout_reason": shift.callout_reason,
         "created_at": shift.created_at.isoformat() if shift.created_at else None,
         "updated_at": shift.updated_at.isoformat() if shift.updated_at else None,
     }
