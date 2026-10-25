@@ -1,3 +1,6 @@
 # Force Unix line endings for shell scripts and Docker entrypoints
 *.sh text eol=lf
 docker-entrypoint.sh text eol=lf
+
+# This file's own patterns are line-sensitive; keep it LF as well
+.gitattributes text eol=lf
