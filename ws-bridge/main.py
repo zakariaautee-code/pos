@@ -5,6 +5,8 @@ Subscribes to Redis pub/sub channels and broadcasts messages to connected WebSoc
 - orders:table:{table_id} (for customers)
 - orders:tenant:{tenant_id} (for restaurant owners - orders)
 - reservations:tenant:{tenant_id} (for restaurant owners - reservations)
+- ops:tenant:{tenant_id} (floor sync - MENU_ITEM_86ED, SHIFT_CALLED_OUT,
+  CAPACITY_UPDATED, TABLE_STATUS_CHANGED; payload carries organization_id)
 """
 import asyncio
 import json
@@ -76,8 +78,10 @@ async def redis_listener():
             r = redis.from_url(redis_url)
             pubsub = r.pubsub()
             
-            # Subscribe to orders and reservations channels
-            await pubsub.psubscribe("orders:table:*", "orders:tenant:*", "reservations:tenant:*")
+            # Subscribe to orders, reservations and floor-ops channels
+            await pubsub.psubscribe(
+                "orders:table:*", "orders:tenant:*", "reservations:tenant:*", "ops:tenant:*"
+            )
 
             async for message in pubsub.listen():
                 if message["type"] == "pmessage":

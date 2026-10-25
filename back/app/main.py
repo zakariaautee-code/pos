@@ -100,6 +100,12 @@ from .svg_sanitize import SvgSanitizeError, sanitize_svg
 # Minimum advance booking for public (unauthenticated) reservations
 RESERVATION_PUBLIC_MIN_LEAD_MINUTES = 10
 from .permissions import Permission, require_permission, require_role, has_permission, can_manage_all_schedules
+from .ops_events import (
+    OpsEvent,
+    compute_live_capacity,
+    publish_capacity_update,
+    publish_ops_event,
+)
 from . import email_service as email_svc
 from .reservation_email_template import MAX_BODY_LEN, MAX_SUBJECT_LEN
 from . import whatsapp_service as whatsapp_svc
@@ -6002,6 +6008,58 @@ def create_product(
     return product
 
 
+@app.patch("/products/{product_id}/86")
+def toggle_product_86(
+    product_id: int,
+    current_user: Annotated[models.User, Depends(require_permission(Permission.PRODUCT_WRITE))],
+    session: Session = Depends(get_session),
+    is_86ed: bool | None = Query(None, description="Force a state; omit to toggle"),
+    quantity_available: int | None = Query(
+        None, description="Optional stock count stored alongside the 86 flag"
+    ),
+) -> dict:
+    """
+    Instant 86: the item stays on the menu but stops being orderable.
+
+    Toggling flips every order view at once - the change is broadcast to the
+    tenant over WebSocket, so no screen needs a manual reload.
+    """
+    product = session.exec(
+        select(models.Product).where(
+            models.Product.id == product_id,
+            models.Product.tenant_id == current_user.tenant_id,
+        )
+    ).first()
+
+    if not product:
+        raise HTTPException(status_code=404, detail="Product not found")
+
+    product.is_86ed = (not product.is_86ed) if is_86ed is None else is_86ed
+    if quantity_available is not None:
+        product.quantity_available = quantity_available
+    session.add(product)
+    session.commit()
+    session.refresh(product)
+
+    publish_ops_event(
+        current_user.tenant_id,
+        OpsEvent.MENU_ITEM_86ED,
+        {
+            "product_id": product.id,
+            "name": product.name,
+            "is_86ed": product.is_86ed,
+            "quantity_available": product.quantity_available,
+        },
+    )
+
+    return {
+        "id": product.id,
+        "name": product.name,
+        "is_86ed": product.is_86ed,
+        "quantity_available": product.quantity_available,
+    }
+
+
 @app.put("/products/{product_id}")
 def update_product(
     product_id: int,
@@ -8351,6 +8409,83 @@ def schedule_notification(
     if not tenant.working_plan_owner_seen_at:
         return {"has_updates": True}
     return {"has_updates": tenant.working_plan_updated_at > tenant.working_plan_owner_seen_at}
+
+
+@app.post("/shifts/{shift_id}/call-out")
+def call_out_shift(
+    shift_id: int,
+    current_user: Annotated[models.User, Depends(require_permission(Permission.SCHEDULE_WRITE))],
+    session: Session = Depends(get_session),
+    reason: str | None = Query(None, max_length=255, description="Why the shift is vacant"),
+) -> dict:
+    """
+    Emergency call-out: mark the shift vacant and broadcast a cover request.
+
+    Emits SHIFT_CALLED_OUT and a follow-up CAPACITY_UPDATED so the floor header
+    immediately drops sellable seats and stretches the estimated turn time.
+    """
+    shift = session.exec(
+        select(models.Shift).where(
+            models.Shift.id == shift_id,
+            models.Shift.tenant_id == current_user.tenant_id,
+        )
+    ).first()
+
+    if not shift:
+        raise HTTPException(status_code=404, detail="Shift not found")
+    if shift.status == models.ShiftStatus.covered:
+        raise HTTPException(status_code=409, detail="Shift is already covered")
+
+    shift.status = models.ShiftStatus.called_out
+    shift.callout_reason = reason
+    session.add(shift)
+    session.commit()
+    session.refresh(shift)
+
+    publish_ops_event(
+        current_user.tenant_id,
+        OpsEvent.SHIFT_CALLED_OUT,
+        {
+            "shift_id": shift.id,
+            "user_id": shift.user_id,
+            "shift_date": shift.shift_date.isoformat(),
+            "start_time": shift.start_time.isoformat(),
+            "end_time": shift.end_time.isoformat(),
+            "status": shift.status.value,
+            "callout_reason": shift.callout_reason,
+            "called_out_by": current_user.email,
+        },
+    )
+    capacity = publish_capacity_update(session, current_user.tenant_id)
+
+    # Phase 4 hook: SMS broadcast to eligible off-duty staff (no-op without Twilio).
+    try:
+        from .sms_service import broadcast_shift_callout
+
+        broadcast_shift_callout(session, shift)
+    except Exception:
+        pass  # Notifications must never fail the call-out itself
+
+    return {
+        "id": shift.id,
+        "status": shift.status.value,
+        "callout_reason": shift.callout_reason,
+        "capacity": capacity,
+    }
+
+
+@app.get("/capacity/live")
+def get_live_capacity(
+    current_user: Annotated[models.User, Depends(require_permission(Permission.TABLE_READ))],
+    session: Session = Depends(get_session),
+) -> dict:
+    """
+    Real-time floor capacity: sellable seats, open tables and estimated turn
+    time, computed dynamically from active floor staffing ratios.
+    """
+    if current_user.tenant_id is None:
+        raise HTTPException(status_code=400, detail="User has no organization")
+    return compute_live_capacity(session, current_user.tenant_id)
 
 
 @app.get("/schedule")
@@ -11985,6 +12120,18 @@ def activate_table(
     session.commit()
     session.refresh(table)
 
+    publish_ops_event(
+        current_user.tenant_id,
+        OpsEvent.TABLE_STATUS_CHANGED,
+        {
+            "table_id": table.id,
+            "name": table.name,
+            "status": "open",
+            "is_active": True,
+        },
+    )
+    publish_capacity_update(session, current_user.tenant_id)
+
     return JSONResponse(content={
         "id": table.id,
         "name": table.name,
@@ -12076,6 +12223,18 @@ def close_table(
         order_data={"type": "table_closed", "table_id": table_id},
         table_id=table_id,
     )
+
+    publish_ops_event(
+        current_user.tenant_id,
+        OpsEvent.TABLE_STATUS_CHANGED,
+        {
+            "table_id": table.id,
+            "name": table.name,
+            "status": "closed",
+            "is_active": False,
+        },
+    )
+    publish_capacity_update(session, current_user.tenant_id)
 
     return JSONResponse(content={
         "id": table.id,
