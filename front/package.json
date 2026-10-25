@@ -1,5 +1,6 @@
 {
-  "name": "front",
+  "name": "mise-pos-web",
+  "description": "Mise POS - Angular web client for the open-source restaurant platform",
   "version": "2.1.186",
   "scripts": {
     "ng": "ng",

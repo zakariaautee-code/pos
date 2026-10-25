@@ -134,7 +134,7 @@ run_migrations() {
     
     # Check if backend container is running
     if ! docker compose $ENV_FILE ps --status=running --services 2>/dev/null | grep -q "^back$"; then
-        echo "ERROR: Backend container (pos-back) is not running."
+        echo "ERROR: Backend container (mise-back) is not running."
         echo "Start the services first with: ./run.sh or ./run.sh -dev"
         exit 1
     fi
@@ -185,7 +185,7 @@ run_migrations_background() {
     
     # Run migrations
     echo "🗄️  Running database migrations..."
-    if docker compose $ENV_FILE exec -T pos-back python -m app.migrate 2>/dev/null; then
+    if docker compose $ENV_FILE exec -T back python -m app.migrate 2>/dev/null; then
         echo "✅ Migrations applied successfully!"
     else
         echo "⚠️  Migration failed or already applied. Check logs if needed."

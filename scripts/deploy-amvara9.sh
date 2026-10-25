@@ -127,7 +127,7 @@ else
   docker compose $COMPOSE_OPTS stop front haproxy ws-bridge back 2>/dev/null || true
 fi
 echo "Force-remove haproxy container if present (clears stuck name/port binds)..."
-docker rm -f pos-haproxy 2>/dev/null || true
+docker rm -f mise-haproxy 2>/dev/null || true
 echo "Brief pause for port release..."
 sleep 3
 

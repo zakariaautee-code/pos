@@ -237,7 +237,7 @@ prepare_001_preflight_context() {
 
   {
     echo ""
-    echo "=== Docker log incident heuristics (pos-front, pos-back, pos-haproxy, pos-postgres) ==="
+    echo "=== Docker log incident heuristics (mise-front, mise-back, mise-haproxy, mise-db) ==="
   } >>"$ctx"
 
   local last_iso
@@ -251,7 +251,7 @@ prepare_001_preflight_context() {
 
   if docker info >/dev/null 2>&1; then
     local c raw hits
-    for c in pos-front pos-back pos-haproxy pos-postgres; do
+    for c in mise-front mise-back mise-haproxy mise-db; do
       if docker inspect "$c" >/dev/null 2>&1; then
         echo "" >>"$ctx"
         echo "--- $c (${log_args[*]}) ---" >>"$ctx"

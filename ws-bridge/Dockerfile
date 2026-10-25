@@ -1,8 +1,8 @@
 # Base image comes from Compose `additional_contexts` (service:back), tagged
-# as `pos-back:latest` on the back service — not `<project>-back` from the
+# as `mise-back:latest` on the back service — not `<project>-back` from the
 # directory name (pos2 vs pos), which broke `FROM pos2-back:latest` on clones
 # named `pos`.
-FROM pos-back
+FROM mise-back
 
 WORKDIR /app
 

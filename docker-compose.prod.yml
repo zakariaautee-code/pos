@@ -14,7 +14,7 @@ services:
       dockerfile: Dockerfile.prod
       args:
         COMMIT_HASH: ${COMMIT_HASH:-}
-    container_name: pos-front
+    container_name: mise-front
     restart: unless-stopped
     # No host port in prod: HAProxy terminates all end-user traffic on 80/443
     environment:

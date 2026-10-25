@@ -144,7 +144,7 @@ async function main() {
     if (tenantFromApi && !tenantFromApi.whatsapp) {
       console.log('Tenant has no whatsapp in API – set WhatsApp number in Settings → Contact for tenant', TENANT_ID);
     } else if (tenantFromApi && tenantFromApi.whatsapp) {
-      console.log('API returns whatsapp but the book page did not show the link – restart the backend (e.g. docker compose restart pos-back) and hard-refresh the browser.');
+      console.log('API returns whatsapp but the book page did not show the link – restart the backend (e.g. docker compose restart mise-back) and hard-refresh the browser.');
     }
     process.exit(0);
   } catch (err) {

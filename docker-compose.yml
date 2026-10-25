@@ -5,8 +5,8 @@ services:
   back:
     build: ./back
     # Stable tag so ws-bridge FROM does not depend on Compose project name (pos vs pos2).
-    image: pos-back:latest
-    container_name: pos-back
+    image: mise-back:latest
+    container_name: mise-back
     restart: unless-stopped
     user: "${DOCKER_UID:-1000}:${DOCKER_GID:-1000}"
     expose:
@@ -51,7 +51,7 @@ services:
 
   front:
     build: ./front
-    container_name: pos-front
+    container_name: mise-front
     restart: unless-stopped
     expose:
       - "4200"
@@ -83,7 +83,7 @@ services:
       - back
   db:
     image: postgres:18-alpine3.23
-    container_name: pos-postgres
+    container_name: mise-db
     restart: unless-stopped
     networks:
       - pos2_net
@@ -104,7 +104,7 @@ services:
 
   redis:
     image: redis:7-alpine
-    container_name: pos-redis
+    container_name: mise-redis
     restart: unless-stopped
     networks:
       - pos2_net
@@ -119,11 +119,11 @@ services:
   ws-bridge:
     build:
       context: ./ws-bridge
-      # Resolve Dockerfile `FROM pos-back` to the back service image (build order + no Hub pull).
+      # Resolve Dockerfile `FROM mise-back` to the back service image (build order + no Hub pull).
       additional_contexts:
-        pos-back: service:back
-    image: pos-ws-bridge:latest
-    container_name: pos-ws-bridge
+        mise-back: service:back
+    image: mise-ws-bridge:latest
+    container_name: mise-ws-bridge
     restart: unless-stopped
     expose:
       - "8021"
@@ -133,7 +133,7 @@ services:
       REDIS_URL: redis://redis:6379
       SECRET_KEY: ${SECRET_KEY:-CHANGE_THIS_IN_PRODUCTION}
       ALGORITHM: ${ALGORITHM:-HS256}
-      API_URL: http://pos-back:8020
+      API_URL: http://mise-back:8020
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:4202,http://127.0.0.1:4202,http://localhost:4200,http://127.0.0.1:4200}
     depends_on:
       redis:
@@ -143,7 +143,7 @@ services:
 
   haproxy:
     image: haproxy:2.8-alpine
-    container_name: pos-haproxy
+    container_name: mise-haproxy
     restart: unless-stopped
     expose:
       - "4202"   # dev only

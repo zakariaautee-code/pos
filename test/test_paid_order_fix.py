@@ -260,7 +260,7 @@ def main():
         try:
             result = subprocess.run(
                 [
-                    "docker", "exec", "pos-postgres", "psql", "-U", "pos", "-d", "pos",
+                    "docker", "exec", "mise-db", "psql", "-U", "pos", "-d", "pos",
                     "-c", f"UPDATE \"order\" SET status = 'paid', notes = COALESCE(notes, '') || E'\\n[PAID: {payment_intent_id}]' WHERE id = {order1_id};"
                 ],
                 capture_output=True,
