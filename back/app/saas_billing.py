@@ -56,6 +56,7 @@ SAAS_EXEMPT_PREFIXES = (
     "/courier",
     "/print-agent",  # LAN print agent polls with its own token (#317)
     "/uploads",
+    "/billing",  # Stripe subscription webhook must reach lapsed tenants too
     "/products",  # guided signup seeds / photos before paywall
     "/users/me",
 )

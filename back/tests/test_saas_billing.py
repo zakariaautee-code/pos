@@ -277,6 +277,80 @@ def test_webhook_route_signature_failure():
         assert r.json()["detail"]["code"] == "invalid_signature"
 
 
+def test_billing_webhook_alias_signature_failure():
+    """POST /billing/webhook (spec path) mirrors /saas/webhook: 400 on bad signature."""
+    with patch("app.saas_routes.construct_saas_webhook_event") as mock_construct:
+        mock_construct.side_effect = HTTPException(
+            status_code=400,
+            detail={
+                "code": "invalid_signature",
+                "message": "Webhook signature verification failed.",
+            },
+        )
+        with TestClient(app) as client:
+            r = client.post(
+                "/billing/webhook",
+                content=b'{"type":"customer.subscription.updated"}',
+                headers={"Stripe-Signature": "t=1,v1=bad"},
+            )
+        assert r.status_code == 400
+        assert r.json()["detail"]["code"] == "invalid_signature"
+
+
+def test_billing_webhook_alias_happy_path():
+    """POST /billing/webhook applies customer.subscription.updated like /saas/webhook."""
+    with Session(engine) as session:
+        tenant = models.Tenant(
+            name=f"BillingAlias-{uuid.uuid4().hex[:8]}",
+            saas_subscription_status=SAAS_STATUS_ACTIVE,
+            saas_stripe_subscription_id=f"sub_{uuid.uuid4().hex[:10]}",
+            saas_stripe_customer_id=f"cus_{uuid.uuid4().hex[:10]}",
+        )
+        session.add(tenant)
+        session.commit()
+        session.refresh(tenant)
+        tid = tenant.id
+        sub_id = tenant.saas_stripe_subscription_id
+        cust_id = tenant.saas_stripe_customer_id
+
+    fake_event = {
+        "id": f"evt_{uuid.uuid4().hex[:12]}",
+        "type": "customer.subscription.updated",
+        "data": {
+            "object": {
+                "id": sub_id,
+                "object": "subscription",
+                "customer": cust_id,
+                "status": "past_due",
+                "current_period_end": int(time.time()) + 86400,
+            }
+        },
+    }
+
+    with patch("app.saas_routes.construct_saas_webhook_event", return_value=fake_event):
+        with TestClient(app) as client:
+            r = client.post(
+                "/billing/webhook",
+                content=b"{}",
+                headers={"Stripe-Signature": "t=1,v1=ok"},
+            )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["received"] is True
+    assert body["handled"] is True
+    assert body["status"] == SAAS_STATUS_PAST_DUE
+
+    with Session(engine) as session:
+        t = session.get(models.Tenant, tid)
+        assert t is not None
+        assert t.saas_subscription_status == SAAS_STATUS_PAST_DUE
+
+
+def test_billing_webhook_alias_is_paywall_exempt():
+    """Stripe must reach the billing webhook even for lapsed subscriptions."""
+    assert path_is_saas_exempt("/billing/webhook")
+
+
 def test_webhook_route_happy_path():
     with Session(engine) as session:
         tenant = models.Tenant(

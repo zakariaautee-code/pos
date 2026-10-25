@@ -8526,6 +8526,22 @@ async def pos_webhook(
     return {"platform": platform, **result}
 
 
+@app.post("/billing/webhook")
+async def billing_webhook(
+    request: Request,
+    session: Session = Depends(get_session),
+) -> dict:
+    """
+    Stripe subscription billing webhook (spec path; same verified handler as
+    POST /saas/webhook): Stripe-Signature checked with SAAS_STRIPE_WEBHOOK_SECRET,
+    then customer.subscription.created/updated/deleted and
+    checkout.session.completed are applied to the tenant's subscription state.
+    """
+    from .saas_routes import saas_stripe_webhook
+
+    return await saas_stripe_webhook(request, session)
+
+
 @app.get("/schedule")
 def list_schedule(
     current_user: Annotated[models.User, Depends(require_permission(Permission.SCHEDULE_READ))],
