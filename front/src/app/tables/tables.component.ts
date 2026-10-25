@@ -2,7 +2,7 @@ import { afterNextRender, Component, DestroyRef, effect, inject, signal, compute
 import { FormsModule } from '@angular/forms';
 import { ActivatedRoute, Router, RouterLink } from '@angular/router';
 import { QRCodeComponent } from 'angularx-qrcode';
-import { ApiService, Table, TenantSettings, Floor, TableActivateResponse, User } from '../services/api.service';
+import { ApiService, LiveCapacity, Table, TenantSettings, Floor, TableActivateResponse, User } from '../services/api.service';
 import { PermissionService } from '../services/permission.service';
 import { SidebarComponent } from '../shared/sidebar.component';
 import { StaffPosToolbarComponent } from '../shared/staff-pos-toolbar.component';
@@ -83,6 +83,17 @@ function getInitialTablesViewMode(): 'tiles' | 'table' {
           }
           </div>
         </div>
+
+        @if (capacity(); as cap) {
+          <div class="capacity-strip" [class.capacity-strip--warn]="cap.outstanding_callouts > 0" data-testid="capacity-strip">
+            <span><strong>{{ cap.sellable_seats }}</strong> sellable seats</span>
+            <span><strong>{{ cap.open_tables }}</strong> open tables</span>
+            <span><strong>{{ cap.estimated_turn_minutes }}</strong> min est. turn</span>
+            @if (cap.outstanding_callouts > 0) {
+              <span class="capacity-strip-warn">{{ cap.outstanding_callouts }} call-out(s) — weakest role: {{ cap.weakest_role || 'n/a' }}</span>
+            }
+          </div>
+        }
 
         <div class="content">
           @if (showForm()) {
@@ -1175,10 +1186,32 @@ function getInitialTablesViewMode(): 'tiles' | 'table' {
     @media (max-width: 768px) {
       .table-grid { grid-template-columns: 1fr; }
     }
+
+    /* Live capacity header (sellable seats / turn time) */
+    .capacity-strip {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem 1.5rem;
+      align-items: center;
+      padding: 0.5rem 0.9rem;
+      margin-bottom: var(--space-4, 1rem);
+      border: 1px solid var(--color-border, #e5e7eb);
+      border-radius: 8px;
+      background: var(--color-bg-subtle, #f8fafc);
+      font-size: 0.875rem;
+    }
+    .capacity-strip--warn {
+      border-color: #fca5a5;
+      background: #fef2f2;
+    }
+    .capacity-strip strong { font-size: 1rem; }
+    .capacity-strip-warn { margin-left: auto; color: #b91c1c; font-weight: 600; }
   `]
 })
 export class TablesComponent implements OnInit {
   private api = inject(ApiService);
+  /** Live capacity header (sellable seats, open tables, est. turn). */
+  capacity = signal<LiveCapacity | null>(null);
   private permissions = inject(PermissionService);
   private router = inject(Router);
   private route = inject(ActivatedRoute);
@@ -1293,6 +1326,14 @@ export class TablesComponent implements OnInit {
     }
   }
 
+  /** Live sellable seats / open tables / est. turn from floor staffing. */
+  loadCapacity(): void {
+    this.api.getLiveCapacity().subscribe({
+      next: (cap) => this.capacity.set(cap),
+      error: () => this.capacity.set(null), // e.g. user lacks TABLE_READ
+    });
+  }
+
   ngOnInit() {
     this.tablesArea.setArea('list');
     const v = this.route.snapshot.queryParamMap.get('view');
@@ -1307,6 +1348,17 @@ export class TablesComponent implements OnInit {
     }
     this.loadData();
     this.loadTenantSettings();
+    // Live capacity header + table status refresh (shift-to-table floor sync)
+    this.api.connectWebSocket();
+    this.loadCapacity();
+    this.api.opsEvents$.subscribe((evt) => {
+      if (evt?.event === 'TABLE_STATUS_CHANGED' || evt?.event === 'CAPACITY_UPDATED') {
+        this.loadCapacity();
+      }
+      if (evt?.event === 'TABLE_STATUS_CHANGED') {
+        this.loadData();
+      }
+    });
     const tickId = setInterval(() => this.nowTick.set(Date.now()), 30_000);
     this.destroyRef.onDestroy(() => clearInterval(tickId));
     this.api.waitForInitialAuthCheck().subscribe(() => {

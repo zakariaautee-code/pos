@@ -4,6 +4,7 @@ import { FormsModule } from '@angular/forms';
 import { Router, ActivatedRoute } from '@angular/router';
 import {
   ApiService,
+  LiveCapacity,
   Shift,
   ShiftCreate,
   ShiftUpdate,
@@ -408,6 +409,17 @@ function isValidView(v: string | null): v is ViewMode {
         </div>
       }
 
+      @if (capacity(); as cap) {
+        <div class="capacity-banner" [class.capacity-banner--warn]="cap.outstanding_callouts > 0" data-testid="capacity-banner">
+          <span class="capacity-metric"><strong>{{ cap.sellable_seats }}</strong> sellable seats</span>
+          <span class="capacity-metric"><strong>{{ cap.open_tables }}</strong> open tables</span>
+          <span class="capacity-metric"><strong>{{ cap.estimated_turn_minutes }}</strong> min est. turn</span>
+          @if (cap.outstanding_callouts > 0) {
+            <span class="capacity-warn">{{ cap.outstanding_callouts }} call-out(s) — weakest role: {{ cap.weakest_role || 'n/a' }}</span>
+          }
+        </div>
+      }
+
       @if (viewMode() === 'week') {
         @if (loading()) {
           <div class="empty-state"><p>{{ 'COMMON.LOADING' | translate }}</p></div>
@@ -427,8 +439,14 @@ function isValidView(v: string | null): v is ViewMode {
                     <span class="shift-label">{{ s.label }}</span>
                   }
                   <span class="shift-user">{{ s.user_name }} ({{ getRoleLabel(s.user_role) }})</span>
+                  @if (s.status === 'called_out') {
+                    <span class="callout-badge" data-testid="callout-badge">Called out{{ s.callout_reason ? ': ' + s.callout_reason : '' }}</span>
+                  }
                 </div>
                 <div class="shift-actions">
+                  @if (canEditShift(s) && s.status !== 'called_out' && s.status !== 'covered') {
+                    <button class="btn btn-ghost btn-sm danger" (click)="openCallout(s)" data-testid="call-out-btn">Call out</button>
+                  }
                   @if (canEditShift(s)) {
                     <button class="btn btn-ghost btn-sm" (click)="openEdit(s)">{{ 'COMMON.EDIT' | translate }}</button>
                     <button class="btn btn-ghost btn-sm danger" (click)="confirmDelete(s)">{{ 'COMMON.DELETE' | translate }}</button>
@@ -642,6 +660,20 @@ function isValidView(v: string | null): v is ViewMode {
         />
       }
 
+      @if (calloutTarget(); as ct) {
+        <div class="modal-overlay" (click)="calloutTarget.set(null)">
+          <div class="modal" (click)="$event.stopPropagation()">
+            <h3>Emergency call-out</h3>
+            <p>Mark {{ ct.user_name }}'s shift on {{ ct.date }} ({{ ct.start_time }}–{{ ct.end_time }}) as vacant? Off-duty staff of the same role get an SMS with a pickup link, and sellable seats drop immediately.</p>
+            <input type="text" class="form-control" [(ngModel)]="calloutReason" placeholder="Reason (sick, emergency, ...)" maxlength="255" data-testid="callout-reason-input" />
+            <div class="modal-actions">
+              <button class="btn btn-secondary" (click)="calloutTarget.set(null)">Cancel</button>
+              <button class="btn btn-danger" (click)="doCallout()" [disabled]="callingOut()" data-testid="callout-confirm">Call out shift</button>
+            </div>
+          </div>
+        </div>
+      }
+
       @if (toast()) {
         <div class="toast" [class]="toast()!.type">
           <span>{{ toast()!.message }}</span>
@@ -838,6 +870,40 @@ function isValidView(v: string | null): v is ViewMode {
     .pva-empty-filtered { font-size: 0.875rem; color: var(--text-muted, #666); margin: 0 0 0.5rem 0; }
     .pva-var-pos { color: var(--color-success, #16a34a); }
     .pva-var-neg { color: var(--danger, #dc2626); }
+    /* Live capacity banner (shift-to-table sync) */
+    .capacity-banner {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.75rem 1.5rem;
+      align-items: center;
+      padding: 0.6rem 0.9rem;
+      margin-bottom: 1rem;
+      border: 1px solid var(--border-color, #e5e7eb);
+      border-radius: 8px;
+      background: var(--bg-subtle, #f8fafc);
+      font-size: 0.875rem;
+    }
+    .capacity-banner--warn {
+      border-color: #fca5a5;
+      background: #fef2f2;
+    }
+    .capacity-metric strong { font-size: 1rem; }
+    .capacity-warn {
+      margin-left: auto;
+      color: #b91c1c;
+      font-weight: 600;
+    }
+    .callout-badge {
+      display: inline-block;
+      margin-left: 0.5rem;
+      padding: 1px 8px;
+      border-radius: 999px;
+      background: #b91c1c;
+      color: #fff;
+      font-size: 0.7rem;
+      font-weight: 700;
+      vertical-align: middle;
+    }
   `],
 })
 export class WorkingPlanComponent implements OnInit, OnDestroy {
@@ -891,6 +957,12 @@ export class WorkingPlanComponent implements OnInit, OnDestroy {
   showModal = signal(false);
   editingShift = signal<Shift | null>(null);
   deleteTarget = signal<Shift | null>(null);
+  /** Live capacity banner (sellable seats, weakest role) from GET /capacity/live. */
+  capacity = signal<LiveCapacity | null>(null);
+  /** Emergency call-out modal target + state. */
+  calloutTarget = signal<Shift | null>(null);
+  calloutReason = '';
+  callingOut = signal(false);
   formError = signal<string | null>(null);
   toast = signal<{ message: string; type: 'success' | 'error' } | null>(null);
   private toastTimeout?: ReturnType<typeof setTimeout>;
@@ -1119,6 +1191,15 @@ export class WorkingPlanComponent implements OnInit, OnDestroy {
     if (typeof localStorage !== 'undefined' && localStorage.getItem(WORKING_PLAN_PVA_OPEN_KEY) === '1') {
       this.pvaSectionOpen.set(true);
     }
+    // Live capacity banner + real-time call-out/capacity updates (floor sync)
+    this.api.connectWebSocket();
+    this.loadCapacity();
+    this.api.opsEvents$.subscribe((evt) => {
+      if (evt?.event === 'SHIFT_CALLED_OUT' || evt?.event === 'CAPACITY_UPDATED') {
+        this.load();
+        this.loadCapacity();
+      }
+    });
     this.api.getUsersForSchedule().subscribe({
       next: (users) => {
         this.scheduleUsers.set(users);
@@ -1614,6 +1695,37 @@ export class WorkingPlanComponent implements OnInit, OnDestroy {
   onExportUserIdSelected(value: number | null): void {
     this.exportUserId.set(value);
     this.fetchPlannedVsActual();
+  }
+
+  loadCapacity(): void {
+    this.api.getLiveCapacity().subscribe({
+      next: (cap) => this.capacity.set(cap),
+      error: () => this.capacity.set(null), // e.g. user lacks TABLE_READ
+    });
+  }
+
+  openCallout(s: Shift): void {
+    this.calloutReason = '';
+    this.calloutTarget.set(s);
+  }
+
+  doCallout(): void {
+    const s = this.calloutTarget();
+    if (!s || this.callingOut()) return;
+    this.callingOut.set(true);
+    this.api.callOutShift(s.id, this.calloutReason).subscribe({
+      next: () => {
+        this.calloutTarget.set(null);
+        this.callingOut.set(false);
+        this.showToast('Shift called out — off-duty staff notified', 'success');
+        this.load();
+        this.loadCapacity();
+      },
+      error: (err) => {
+        this.callingOut.set(false);
+        this.showToast(this.getApiErrorMessage(err), 'error');
+      },
+    });
   }
 
   load(): void {

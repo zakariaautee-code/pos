@@ -499,7 +499,7 @@ import { ProductBulkImportComponent } from './product-bulk-import.component';
                    </thead>
                   <tbody>
                     @for (product of filteredProducts(); track product.id) {
-                      <tr>
+                      <tr [class.is-86ed]="product.is_86ed">
                         <td>
                           @if (product.image_filename) {
                             <div class="image-preview-wrapper">
@@ -519,7 +519,11 @@ import { ProductBulkImportComponent } from './product-bulk-import.component';
                           }
                         </td>
                         <td>
-                          <div>{{ product.name }}</div>
+                          <div>{{ product.name }}
+                            @if (product.is_86ed) {
+                              <span class="badge-86" data-testid="badge-86">86'd</span>
+                            }
+                          </div>
                           @if (product.ingredients) {
                             <small class="ingredients">{{ product.ingredients }}</small>
                           }
@@ -585,6 +589,11 @@ import { ProductBulkImportComponent } from './product-bulk-import.component';
                         </td>
                         <td class="actions">
                           <div class="actions-inner">
+                          @if (canEditProducts()) {
+                            <button class="icon-btn" [class.icon-btn-86-active]="product.is_86ed" (click)="toggle86(product)" [attr.title]="product.is_86ed ? 'Bring back (remove 86)' : 'Mark 86 (out of stock)'" [attr.data-testid]="'toggle-86-' + product.id">
+                              <span class="badge-86-btn">86</span>
+                            </button>
+                          }
                           <button class="icon-btn" (click)="startEdit(product)" [attr.title]="'PRODUCTS.EDIT_TOOLTIP' | translate">
                             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                               <path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/>
@@ -761,6 +770,8 @@ export class ProductsComponent implements OnInit {
   );
 
   ngOnInit() {
+    // Real-time floor sync: ops events (86, call-outs, capacity) arrive over the shared WS.
+    this.api.connectWebSocket();
     this.loadTenantSettingsThenProducts();
     this.loadCategories();
     // Load all taxes (not only "valid today") so dropdowns aren't empty due to validity-period edge cases.
@@ -770,6 +781,30 @@ export class ProductsComponent implements OnInit {
       error: () => this.kitchenStations.set([]),
     });
     this.translate.onLangChange.subscribe(() => this.intlRevision.update((n) => n + 1));
+    // Real-time 86 changes pushed from other devices (shift-to-table floor sync)
+    this.api.opsEvents$.subscribe((evt) => {
+      if (evt?.event === 'MENU_ITEM_86ED' && evt.product_id != null) {
+        this.patchProduct86(evt.product_id, !!evt.is_86ed);
+      }
+    });
+  }
+
+  /** Instant 86: flips stock state on the server; the WS event syncs other screens. */
+  toggle86(product: Product) {
+    if (product.id == null) return;
+    this.api.toggleProduct86(product.id).subscribe({
+      next: (res) => this.patchProduct86(res.id, res.is_86ed),
+      error: (err) => console.error('86 toggle failed:', err),
+    });
+  }
+
+  private patchProduct86(productId: number, is86ed: boolean) {
+    this.products.update((list) =>
+      list.map((p) => (p.id === productId ? { ...p, is_86ed: is86ed } : p)),
+    );
+    this.filteredProducts.update((list) =>
+      list.map((p) => (p.id === productId ? { ...p, is_86ed: is86ed } : p)),
+    );
   }
 
   loadCategories() {

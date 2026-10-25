@@ -181,8 +181,36 @@ export interface Shift {
   start_time: string;
   end_time: string;
   label: string | null;
+  /** Lifecycle: staffed, called out, or covered by someone else. */
+  status?: 'active' | 'called_out' | 'covered';
+  callout_reason?: string | null;
   created_at?: string;
   updated_at?: string;
+}
+
+/** Per-role staffing behind the live capacity number. */
+export interface CapacityRole {
+  role: string;
+  required: number;
+  scheduled: number;
+  missing: number;
+}
+
+/** GET /capacity/live — sellable seats derived from today's floor staffing. */
+export interface LiveCapacity {
+  organization_id: number;
+  tenant_id: number;
+  date: string;
+  total_tables: number;
+  open_tables: number;
+  total_seats: number;
+  occupied_seats: number;
+  sellable_seats: number;
+  coverage_ratio: number;
+  estimated_turn_minutes: number;
+  outstanding_callouts: number;
+  weakest_role: string | null;
+  roles: CapacityRole[];
 }
 
 export interface ShiftCreate {
@@ -1012,6 +1040,8 @@ export interface Product {
   list_price_cents?: number | null;
   promo_label?: string | null;
   promo_percent_off?: number | null;
+  /** Instant 86: item is out of stock and must not be sold (floor-sync events). */
+  is_86ed?: boolean;
 }
 
 /** Kitchen / bar prep station (owner-defined; filters KDS by station). */
@@ -2092,11 +2122,15 @@ export class ApiService {
 
   private orderUpdates = new Subject<any>();
   private reservationUpdates = new Subject<any>();
+  /** Org-scoped floor-sync events (shift-to-table sync). */
+  private opsEvents = new Subject<any>();
   private ws: WebSocket | null = null;
 
   user$ = this.userSubject.asObservable();
   orderUpdates$ = this.orderUpdates.asObservable();
   reservationUpdates$ = this.reservationUpdates.asObservable();
+  /** Real-time floor events: MENU_ITEM_86ED, SHIFT_CALLED_OUT, CAPACITY_UPDATED, TABLE_STATUS_CHANGED. */
+  opsEvents$ = this.opsEvents.asObservable();
 
   constructor() {
     this.checkAuth()
@@ -4218,6 +4252,13 @@ export class ApiService {
       this.ws.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data);
+          const isOps = data?.event && [
+            'MENU_ITEM_86ED', 'SHIFT_CALLED_OUT', 'CAPACITY_UPDATED', 'TABLE_STATUS_CHANGED'
+          ].includes(data.event);
+          if (isOps) {
+            this.opsEvents.next(data);
+            return;
+          }
           const isReservation = data?.type && [
             'new_reservation', 'reservation_updated', 'reservation_status',
             'reservation_seated', 'reservation_finished', 'reservation_cancelled'
@@ -4568,6 +4609,32 @@ export class ApiService {
 
   deleteShift(shiftId: number): Observable<{ deleted: boolean; id: number }> {
     return this.http.delete<{ deleted: boolean; id: number }>(`${this.apiUrl}/schedule/${shiftId}`);
+  }
+
+  // --- Real-time floor ops (shift-to-table sync) ---
+
+  /** Toggle a menu item's 86 (out-of-stock) flag; broadcasts MENU_ITEM_86ED to the tenant. */
+  toggleProduct86(productId: number): Observable<{ id: number; is_86ed: boolean }> {
+    return this.http.patch<{ id: number; is_86ed: boolean }>(
+      `${this.apiUrl}/products/${productId}/86`,
+      {},
+    );
+  }
+
+  /** Emergency call-out: marks the shift vacant, SMS to off-duty staff, capacity drops. */
+  callOutShift(shiftId: number, reason?: string): Observable<{ id: number; status: string; callout_reason: string | null }> {
+    let params = new HttpParams();
+    if (reason?.trim()) params = params.set('reason', reason.trim());
+    return this.http.post<{ id: number; status: string; callout_reason: string | null }>(
+      `${this.apiUrl}/shifts/${shiftId}/call-out`,
+      null,
+      { params },
+    );
+  }
+
+  /** Live sellable seats, open tables and estimated turn time from floor staffing. */
+  getLiveCapacity(): Observable<LiveCapacity> {
+    return this.http.get<LiveCapacity>(`${this.apiUrl}/capacity/live`);
   }
 
   /** One worker's shifts for a calendar month as Excel (.xlsx). */

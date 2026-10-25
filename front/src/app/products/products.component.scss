@@ -420,3 +420,29 @@
 .muted {
   color: var(--color-text-muted);
 }
+
+/* Instant 86: row dimmed + red badge, active toggle in the actions column. */
+tr.is-86ed td {
+  opacity: 0.55;
+}
+.badge-86 {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: #b91c1c;
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  vertical-align: middle;
+}
+.badge-86-btn {
+  font-weight: 800;
+  font-size: 12px;
+}
+.icon-btn-86-active {
+  background: #b91c1c;
+  color: #fff;
+  border-color: #b91c1c;
+}
